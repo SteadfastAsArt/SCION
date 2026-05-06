@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+*.egg-info/
+
+# Reproducible baselines + ensemble outputs (regenerable from sources)
+python_port/scion_python_baseline.npz
+python_port/scion_python_baseline_numba.npz
+python_port/scion_octave_baseline.mat
+python_port/scion_matlab_baseline.mat
+python_port/scion_sens_results.npz
+python_port/scion_python_tuned_results.npz
+python_port/scion_python_tuned_baseline.npz
+
+# Logs and profiling artifacts
+python_port/octave_run.log
+python_port/profile_baseline.txt
+python_port/profile_*.txt
+*.log
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
