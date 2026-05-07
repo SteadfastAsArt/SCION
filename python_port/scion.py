@@ -741,6 +741,11 @@ class Pars:
     pass
 
 
+def build_pars() -> dict:
+    """Public alias of _build_pars: return the SCION parameter dict (mirrors MATLAB pars)."""
+    return _build_pars()
+
+
 def _build_pars() -> dict:
     p: dict = {}
     p['k_reductant_input'] = 0.4e12
@@ -927,7 +932,9 @@ def _build_y0(p: dict, tuning: dict | None = None) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def _make_rhs(p: dict, F: dict, rel_contrib: np.ndarray, recorder: list,
-              sens_params: dict | None = None):
+              sens_params: dict | None = None,
+              gridstate_recorder: list | None = None,
+              runstamps: np.ndarray | None = None):
     """Build closure for the ODE RHS plus per-call diagnostic recording.
 
     sens_params: dict with keys r1..r7 each in [-1,1], mirroring SCION_equations.m
@@ -978,6 +985,14 @@ def _make_rhs(p: dict, F: dict, rel_contrib: np.ndarray, recorder: list,
         'q_p': np.empty((_nlat, _nlon)), 'q_f': np.empty((_nlat, _nlon)),
         'tair_p': np.empty((_nlat, _nlon)), 'tair_f': np.empty((_nlat, _nlon)),
     }
+
+    # Gridstate keyframe stamp tracker: mirrors MATLAB SCION_equations.m lines
+    # 742-770. State persists across rhs calls inside this closure.
+    gs_state = {'next_idx': 0, 'finished': False}
+    if gridstate_recorder is not None and runstamps is not None and runstamps.size > 0:
+        gs_state['active'] = True
+    else:
+        gs_state['active'] = False
 
     A0 = p['A0']; O0 = p['O0']; G0 = p['G0']; C0 = p['C0']
     PYR0 = p['PYR0']; GYP0 = p['GYP0']; S0 = p['S0']; P0 = p['P0']; N0 = p['N0']
@@ -1068,6 +1083,58 @@ def _make_rhs(p: dict, F: dict, rel_contrib: np.ndarray, recorder: list,
             k_carb_scale, p['k_basw'], p['k_granw'], silw_scale,
             _spatial_bufs,
         )
+
+        # ---- gridstate keyframe capture (mirrors MATLAB lines 742-770) ----
+        # Triggered when t_geol exceeds the next stamp boundary, or at t=0.
+        # Recompute per-cell PAST maps via the numpy kernel (the numba 'full'
+        # kernel reduces inline and doesn't return per-cell fields).
+        if gs_state['active'] and not gs_state['finished']:
+            next_stamp = float(runstamps[gs_state['next_idx']])
+            if t_geol > next_stamp or t_geol == 0.0:
+                # Numpy kernel writes per-cell maps into _spatial_bufs.
+                _spatial_weathering_kernel_numpy(
+                    t_geol, CO2ppm,
+                    IS_time, IS_CO2,
+                    IS_runoff, IS_Tair,
+                    IS_slope, IS_arc, IS_relict_arc, IS_suture,
+                    ARCfactor, SUTUREfactor,
+                    k_erosion, Xm, Kw, kw, Ea, z, sigplus1, T0, R,
+                    _spatial_bufs['eps_p'], _spatial_bufs['eps_f'],
+                    _spatial_bufs['cw_per_p'], _spatial_bufs['cw_per_f'],
+                    _spatial_bufs['q_p'], _spatial_bufs['q_f'],
+                    _spatial_bufs['tair_p'], _spatial_bufs['tair_f'],
+                )
+                Q_past = _spatial_bufs['q_p'].copy()
+                Tair_past = _spatial_bufs['tair_p'].copy()
+                EPSILON_past = _spatial_bufs['eps_p'].copy()
+                CW_per_km2_past = _spatial_bufs['cw_per_p'].copy()
+                land_past = IS_land[:, :, key_past_index].copy()
+                TOPO_past = IS_topo[:, :, key_past_index].copy()
+                ARC_past = IS_arc[:, :, key_past_index].copy()
+                RELICT_ARC_past = IS_relict_arc[:, :, key_past_index].copy()
+                SUTURE_past = IS_suture[:, :, key_past_index].copy()
+                CWcarb_per_km2_past = k_carb_scale * Q_past
+                CWcarb_past = CWcarb_per_km2_past * IS_gridarea
+                CWcarb_past = np.where(np.isnan(CWcarb_past), 0.0, CWcarb_past)
+                gridstate_recorder.append({
+                    'time_myr': next_stamp,
+                    'land': land_past,
+                    'Q': Q_past,
+                    'Tair': Tair_past,
+                    'TOPO': TOPO_past,
+                    'CW': CW_per_km2_past,
+                    'CWcarb': CWcarb_past,
+                    'EPSILON': EPSILON_past * 1e6,  # match MATLAB units (t/km2/yr)
+                    'ARC': ARC_past,
+                    'RELICT_ARC': RELICT_ARC_past,
+                    'SUTURE': SUTURE_past,
+                })
+                if t_geol < 0.0:
+                    gs_state['next_idx'] += 1
+                    if gs_state['next_idx'] >= runstamps.size:
+                        gs_state['finished'] = True
+                else:
+                    gs_state['finished'] = True
 
         # ---- Global vars ----
         V_T = 1.0 - ((GAST - 25.0) / 25.0)**2
@@ -1232,6 +1299,16 @@ def run(runcontrol: int = 0, save_path: str | None = None,
         atol: float = 1e-9) -> dict:
     """Single run; returns a dict of state and diagnostic time series.
 
+    runcontrol semantics (mirrors MATLAB SCION_initialise):
+      0  full deterministic run; gridstate captured at INTERPSTACK keyframes;
+         downstream plotting may include worldgraphic.
+      -1 same integration as 0 but downstream plotting should skip worldgraphic
+         (out['skip_worldgraphic'] = True signals this; numerics identical).
+      -2 present-day steady-state: skip ODE integration, evaluate RHS once at
+         t=0 with y=y0. Returns a small dict (no time series). gridstate has
+         a single keyframe at t=0.
+      >=1 sensitivity-mode single run; expects sens_params (else deterministic).
+
     tuning: optional dict with keys Gtune, Ctune, PYRtune, GYPtune, Otune,
         Stune, Atune used to override the default starting reservoir multipliers
         (mirrors MATLAB tuning global).
@@ -1247,12 +1324,52 @@ def run(runcontrol: int = 0, save_path: str | None = None,
     lat_weights = lat_areas / np.mean(lat_areas)
     rel_contrib = np.tile(lat_weights[:, None], (1, 48))
 
+    # Gridstate keystamp times (MATLAB SCION_initialise lines 265-269).
+    # whenstart = -1e9 yr -> -1000 Myr. runstamps = INTERPSTACK.time(time>-1000).
+    IS_time = np.asarray(interp.time, dtype=float)
+    if runcontrol == -2:
+        runstamps = np.array([0.0])
+    else:
+        runstamps = IS_time[IS_time > -1000.0]
+
     y0 = _build_y0(p, tuning=tuning)
     recorder: list = []
-    rhs = _make_rhs(p, F, rel_contrib, recorder, sens_params=sens_params)
+    # Disable gridstate capture in sensanal mode (MATLAB only records when
+    # sensanal == 0). runcontrol >= 1 = sensanal in MATLAB convention.
+    sensanal_mode = runcontrol >= 1
+    gridstate_recorder: list = [] if not sensanal_mode else None
+    rhs = _make_rhs(p, F, rel_contrib, recorder, sens_params=sens_params,
+                    gridstate_recorder=gridstate_recorder, runstamps=runstamps)
 
     t_start = -1e9
     t_end = 0.0
+
+    # runcontrol == -2: present-day steady state — single RHS evaluation, no integration.
+    if runcontrol == -2:
+        wall0 = _time.time()
+        rhs(0.0, y0)
+        wall = _time.time() - wall0
+        snap = recorder[-1] if recorder else {}
+        out: dict[str, Any] = {'runcontrol': -2,
+                               't': np.array([0.0]),
+                               'time_myr': np.array([0.0]),
+                               'wall_seconds': wall,
+                               'y0': y0.copy()}
+        # Surface every diagnostic from the recorder snapshot as scalar arrays.
+        for k, v in snap.items():
+            if k in ('t', 'y'):
+                continue
+            out[k] = np.array([v])
+        # Surface reservoir labels for parity with full-run schema.
+        labels = ['P', 'O', 'A', 'S', 'G', 'C', 'PYR', 'GYP', 'TEMP', 'CAL', 'N',
+                  'G_iso', 'C_iso', 'PYR_iso', 'GYP_iso', 'A_iso', 'S_iso',
+                  'OSr', 'OSr_iso', 'SSr', 'SSr_iso']
+        for i, lab in enumerate(labels):
+            out[lab] = np.array([y0[i]])
+        if gridstate_recorder is not None and len(gridstate_recorder) > 0:
+            out['gridstate'] = _stack_gridstate(gridstate_recorder)
+        out['pars'] = p
+        return out
 
     wall0 = _time.time()
     sol = solve_ivp(rhs, (t_start, t_end), y0,
@@ -1302,12 +1419,33 @@ def run(runcontrol: int = 0, save_path: str | None = None,
     out['n_steps_total'] = len(recorder)
     out['n_accepted'] = len(accepted_t)
     out['wall_seconds'] = wall
+    out['runcontrol'] = runcontrol
+    out['skip_worldgraphic'] = (runcontrol == -1)
+    out['pars'] = p
+
+    if gridstate_recorder is not None and len(gridstate_recorder) > 0:
+        out['gridstate'] = _stack_gridstate(gridstate_recorder)
 
     if save_path is not None:
         save_dict = {k: v for k, v in out.items() if isinstance(v, np.ndarray)}
         save_dict['n_steps_total'] = np.array([out['n_steps_total']])
         save_dict['n_accepted'] = np.array([out['n_accepted']])
         save_dict['wall_seconds'] = np.array([out['wall_seconds']])
+        # Persist gridstate sub-fields with prefix so np.load can read them flat.
+        if 'gridstate' in out:
+            for gk, gv in out['gridstate'].items():
+                save_dict[f'gridstate__{gk}'] = gv
         np.savez_compressed(save_path, **save_dict)
 
+    return out
+
+
+def _stack_gridstate(records: list) -> dict:
+    """Stack per-stamp gridstate dicts into MATLAB-shape (40, 48, N_stamps) arrays."""
+    n = len(records)
+    keys2d = ['land', 'Q', 'Tair', 'TOPO', 'CW', 'CWcarb', 'EPSILON',
+              'ARC', 'RELICT_ARC', 'SUTURE']
+    out: dict = {'time_myr': np.array([r['time_myr'] for r in records])}
+    for k in keys2d:
+        out[k] = np.stack([r[k] for r in records], axis=2)
     return out

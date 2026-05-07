@@ -32,6 +32,31 @@ def _final_relatives(result: dict, p: dict) -> np.ndarray:
     return rels
 
 
+def cost(params, forcings_dir: str = 'forcings',
+         method: str = 'LSODA', rtol: float = 1e-4, atol: float = 1e-7) -> float:
+    """Standalone tuning cost evaluator (mirrors MATLAB SCION_tuning_function).
+
+    params: length-7 sequence in MATLAB order [Gtune, Ctune, PYRtune, GYPtune,
+        Otune, Stune, Atune]. Sign of each is taken via abs() inside scion.run
+        (MATLAB SCION_initialise lines 307-313).
+    Returns scalar sum of squared deviations of the seven reservoir reltail
+    values from 1.0:
+        cost = sum_i (X_i(end)/X_i0 - 1)^2  for i in {O,A,S,PYR,GYP,C,G}.
+    On integration failure returns 1e6 to match the optimizer-friendly fallback.
+    """
+    x = np.asarray(params, dtype=float)
+    assert x.shape == (7,), 'params must be length 7'
+    p_ref = scion._build_pars()
+    tuning = _params_to_dict(x)
+    try:
+        result = scion.run(tuning=tuning, forcings_dir=forcings_dir,
+                           method=method, rtol=rtol, atol=atol)
+    except Exception:
+        return 1e6
+    rels = _final_relatives(result, p_ref)
+    return float(np.sum((rels - 1.0) ** 2))
+
+
 def tune(initial_guess: np.ndarray | None = None,
          save_path: str = 'scion_python_tuned_results.npz',
          baseline_save_path: str = 'scion_python_tuned_baseline.npz',

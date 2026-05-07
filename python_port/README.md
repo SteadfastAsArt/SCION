@@ -10,7 +10,7 @@ and tune it without MATLAB.
 | File | Purpose |
 |---|---|
 | `scion.py` | Core port. Re-implements `SCION_initialise.m` + `SCION_equations.m` (21-state ODE, 2-D spatial weathering) on top of `scipy.integrate.solve_ivp`. |
-| `scion_plot.py` | Reproduces `SCION_plot_fluxes.m` (16-panel global figure, with proxy-data overlays). |
+| `scion_plot.py` | Reproduces all four MATLAB plotting scripts: `plot_fluxes()` for `SCION_plot_fluxes.m` (16-panel global figure with proxy-data overlays), `plot_worldgraphic()` for `SCION_plot_worldgraphic.m` (2-D spatial maps at 9 keyframes × 6 columns), `plot_sens()` for `SCION_plot_sens.m` (10-panel ensemble figure). |
 | `scion_sens.py` | Multiprocessing port of `SCION_sens.m` — 100 random sensitivity runs. |
 | `scion_tune.py` | Nelder-Mead replacement for `SCION_run_tuning.m` patternsearch. |
 | `compare.py` | Field-by-field comparison of the Python output against an Octave/MATLAB baseline `.mat` (RMSE / max relative error / overlay plots). |
@@ -33,17 +33,39 @@ Single 1-Gyr deterministic run. Approximately **20 s** wall on a recent x86 CPU.
 ```python
 import scion
 out = scion.run(
-    save_path = 'baseline.npz',          # optional — write per-step arrays
-    tuning    = None,                    # optional dict[Gtune,Ctune,...,Atune]
+    runcontrol = 0,                      # 0 full, -1 flux-only-plot, -2 steady-state
+    save_path  = 'baseline.npz',         # optional — write per-step arrays
+    tuning     = None,                   # optional dict[Gtune,Ctune,...,Atune]
     sens_params = None,                  # optional dict[r1..r7] each in [-1, 1]
-    method    = 'BDF',                   # 'BDF' / 'LSODA' / 'Radau' …
-    rtol      = 1e-6,
-    atol      = 1e-9,
+    method     = 'BDF',                  # 'BDF' / 'LSODA' / 'Radau' …
+    rtol       = 1e-6,
+    atol       = 1e-9,
 )
 ```
 
-`out` is a `dict` with arrays for the 21 state variables, ~30 diagnostic
-fluxes, and `time_myr`. Same field names as the MATLAB `state` struct.
+`out` is a `dict` containing:
+- 21 state variables and ~30 diagnostic fluxes (same field names as MATLAB `state`).
+- `out['gridstate']` — `(40, 48, n_stamps)` 2-D maps captured at each
+  INTERPSTACK keyframe boundary (`land`, `Q`, `Tair`, `TOPO`, `CW`,
+  `CWcarb`, `EPSILON`, `ARC`, `RELICT_ARC`, `SUTURE`). 28 stamps for a
+  full `runcontrol=0` run, 1 stamp for `runcontrol=-2`.
+- `out['pars']` — full parameter dict (also obtainable directly via
+  `scion.build_pars()`).
+
+`runcontrol` modes:
+- `0` — full deterministic 1-Gyr integration with full state + gridstate.
+- `-1` — same numerics; sets `out['skip_worldgraphic']=True` to hint that
+  downstream plotting should skip the spatial-map figures.
+- `-2` — present-day **steady-state single RHS evaluation** (no time
+  integration). Returns the same dict schema with length-1 arrays.
+  Wall ~0.2 s.
+
+### Tuning cost as a standalone callable
+
+```python
+from scion_tune import cost
+c = cost([0.45, 1.0, 1.1, 1.0, 0.1, 0.05, 3.0])  # mirrors SCION_tuning_function.m
+```
 
 ### Octave baseline (no MATLAB available)
 

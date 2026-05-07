@@ -110,4 +110,4 @@
 - Python native points: 7853 (7853 unique)
 - Comparison grid size: 1001
 - Plot files: /home/laz/proj/SCION/python_port/comparison_plots/group_NN.png (14 figures)
-- Total wall-clock for compare.py: **11.23 s**
+- Total wall-clock for compare.py: **11.40 s**

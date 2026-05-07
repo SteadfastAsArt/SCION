@@ -31,17 +31,19 @@ FIELD_MAP = {
 T_GRID = np.linspace(-1e9, 0.0, 1001)
 
 
-def _worker(run_index: int) -> dict | None:
+def _worker(args) -> dict | None:
     """Run a single SCION integration with seeded random sens params.
 
+    args: tuple (run_index, seed_offset). Per-run RNG seed = run_index + seed_offset.
     Returns dict of (T_grid,) interpolated arrays plus 'run_index', or None
     if the integration failed or ANOX has NaN.
     """
+    run_index, seed_offset = args
     # Late import inside child so each worker re-imports scion fresh.
     sys.path.insert(0, os.path.join(os.path.dirname(__file__) or '.', '.'))
     import scion  # type: ignore
 
-    rng = np.random.default_rng(run_index)
+    rng = np.random.default_rng(run_index + seed_offset)
     rs = rng.uniform(-1.0, 1.0, size=7)
     sens_params = {f'r{i+1}': float(rs[i]) for i in range(7)}
 
@@ -87,19 +89,30 @@ def run_ensemble(n_runs: int = 100,
                  n_workers: int | None = None,
                  save_path: str = 'python_port/scion_sens_results.npz',
                  plot_path: str = 'scion_sens_ensemble.png',
-                 baseline_path: str = 'python_port/scion_python_baseline.npz') -> dict:
-    """Run a parallel Monte-Carlo SCION sensitivity ensemble and save results."""
+                 baseline_path: str = 'python_port/scion_python_baseline.npz',
+                 seed: int | None = None) -> dict:
+    """Run a parallel Monte-Carlo SCION sensitivity ensemble and save results.
+
+    Seeding semantics: each worker uses np.random.default_rng(run_index + seed_offset).
+    seed=None (default) -> seed_offset=0 -> per-run seed = run_index (legacy
+    deterministic behaviour, identical to prior versions). Pass seed=K to shift
+    all per-run seeds by K for an independent reproducible ensemble. MATLAB's
+    SCION_sens.m uses MATLAB's implicit RNG state and is non-reproducible by
+    default; this Python port is reproducible by construction.
+    """
     if n_workers is None:
         n_workers = max(1, (os.cpu_count() or 2) // 2)
+    seed_offset = 0 if seed is None else int(seed)
 
-    print(f'[scion_sens] launching {n_runs} runs across {n_workers} workers')
+    print(f'[scion_sens] launching {n_runs} runs across {n_workers} workers '
+          f'(seed_offset={seed_offset})')
     wall0 = _time.time()
 
     completed: list[dict] = []
     n_failed = 0
 
     with ProcessPoolExecutor(max_workers=n_workers) as ex:
-        futures = {ex.submit(_worker, i): i for i in range(n_runs)}
+        futures = {ex.submit(_worker, (i, seed_offset)): i for i in range(n_runs)}
         done = 0
         for fut in as_completed(futures):
             done += 1
